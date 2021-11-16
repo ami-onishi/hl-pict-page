@@ -28,8 +28,10 @@ from PIL import ImageFont, ImageDraw, Image
 import signal
 import mediapipe as mp
 from utils import CvFpsCalc
-
-import datetime
+from ibm_watson import SpeechToTextV1
+from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+import subprocess
+from os.path import join, dirname
 
 IMAGE_FOLDER_PATH = "./images"
 JPG_BG_PATH = os.path.join(IMAGE_FOLDER_PATH, "background.jpg")
@@ -44,10 +46,18 @@ CHANNEL_ACCESS_TOKEN = os.environ["CHANNEL_ACCESS_TOKEN"]
 CHANNEL_SECRET = os.environ["CHANNEL_SECRET"]
 BEEBOTTE_TOKEN = os.environ["BEEBOTTE_TOKEN"]
 NEGAPOSI_KEY = os.environ["NEGAPOSI_KEY"]
+WATSON_API_KEY = os.environ["WATSON_API_KEY"]
+WATSON_API_URL = os.environ["WATSON_API_URL"]
 
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 client = mqtt.Client()
+
+authenticator = IAMAuthenticator(WATSON_API_KEY)
+speech_to_text = SpeechToTextV1(
+    authenticator=authenticator
+)
+speech_to_text.set_service_url(WATSON_API_URL)
 
 # codamaのwake up wordが検出されるとhighになるGPIO
 CODAMA_TRIGGERD_GPIO = 27
@@ -171,9 +181,40 @@ def codama_setup():
 def detected_callback(value):
     # wake up wordを検出したら、Sebastienの音声入力をONにする
     try:
-        line_bot_api.push_message(os.environ["USER_ID"], TextSendMessage(text='お疲れ様です'))
-        line_bot_api.push_message(os.environ["USER_ID"], TextSendMessage(text='たすけてください!!!!'))
-        print("detected_callback")
+        # ---- 録音 ----
+
+        speech_file = "speech.wav"
+        threading.Thread(target=show_message, args=("メッセージをどうぞ",)).start()
+        proc_args = f"arecord -D plughw:1,0 -f cd {speech_file}"
+        proc = subprocess.Popen(proc_args.split(), stdout=subprocess.PIPE)
+        time.sleep(3)
+        os.kill(proc.pid, signal.SIGINT)
+        time.sleep(1)
+        threading.Thread(target=show_message, args=("おわり！",)).start()
+
+        time.sleep(1)
+        with open(join(dirname(__file__), './.', speech_file), 'rb') as audio_file:
+            speech_recognition_results = speech_to_text.recognize(audio=audio_file,
+                content_type='audio/wav',
+                word_alternatives_threshold=0.9,
+                model='ja-JP_BroadbandModel',
+            ).get_result()
+
+            print("---------------------")
+            print(json.dumps(speech_recognition_results, indent=2))
+            print("---------------------")
+        # audio_file = sr.AudioFile(speech_file)
+        # speech_recognizer = sr.Recognizer()
+        #
+        # with audio_file as source:
+        #     speech_recognizer.adjust_for_ambient_noise(source)
+        #     clean_audio = speech_recognizer.record(source)
+        #
+        # recognized_speech_ibm = r.recognize_ibm(clean_audio, username="apkikey", password= "your API Key")
+
+        # line_bot_api.push_message(os.environ["USER_ID"], TextSendMessage(text='お疲れ様です'))
+        # line_bot_api.push_message(os.environ["USER_ID"], TextSendMessage(text='たすけてください!!!!'))
+        line_bot_api.push_message(os.environ["USER_ID"], TextSendMessage(text=speech_recognition_results['results'][0]['alternatives'][0]['transcript']))
 
         sound = AudioSegment.from_file("kodama_audio.m4a")
         threading.Thread(target=play, args=(sound,)).start()
@@ -181,11 +222,15 @@ def detected_callback(value):
         asyncio.run(show_giffile(GIF_SUMMON_PATH, display_time = 6))
         show_image_fullscreen(JPG_BG_PATH)
 
+        cv2.waitKey(500)
+
     except LineBotApiError as e:
         print(e.status_code)
         print(e.request_id)
         print(e.error.message)
         print(e.error.details)
+    except Exception as exception:
+        print("error message:{0}".format(exception.with_traceback(sys.exc_info()[2])))
 
 def cleanup():
     print ("cleanup")
